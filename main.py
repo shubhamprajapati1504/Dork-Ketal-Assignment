@@ -1,6 +1,7 @@
 """FastAPI service for product demand forecasts and inventory recommendations."""
 
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,10 +9,13 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 DATA_PATH = BASE_DIR / "Data" / "processed_csv_dataset.csv"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_model.pkl"
 SAFETY_STOCK_RATE = 0.20
@@ -36,6 +40,14 @@ class PredictionResponse(BaseModel):
     forecast_demand: int
     recommended_order: int
     stockout_risk: bool
+
+
+class ExplanationRequest(PredictionResponse):
+    current_inventory: int = Field(..., ge=0)
+
+
+class ExplanationResponse(BaseModel):
+    explanation: str
 
 
 def add_lag_features(data: pd.DataFrame) -> pd.DataFrame:
@@ -98,6 +110,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Allows the React development server (normally http://localhost:5173) to
+# call this API while developing the dashboard.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -121,3 +143,49 @@ def predict(request: PredictionRequest) -> dict[str, Any]:
         "recommended_order": recommended_order,
         "stockout_risk": request.current_inventory < forecast,
     }
+
+
+@app.post("/explain", response_model=ExplanationResponse)
+def explain_forecast(request: ExplanationRequest) -> dict[str, str]:
+    """Use an LLM only to explain the model output; it never calculates forecasts."""
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI helper is not configured. Add GEMINI_API_KEY to your .env file.",
+        )
+
+    prompt = f"""Explain this inventory forecast in one simple, useful sentence.
+Use the numbers exactly as supplied. Do not calculate, change, or invent any values.
+
+Product ID: {request.product_id}
+Forecast demand: {request.forecast_demand}
+Current inventory: {request.current_inventory}
+Recommended order: {request.recommended_order}
+Stockout risk: {request.stockout_risk}
+    """
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=gemini_api_key)
+        response = client.interactions.create(
+            model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+            input=(
+                "You are an inventory assistant. Explain only the supplied forecast data "
+                "in plain English. Keep the response under 100 words.\n\n"
+                + prompt
+            ),
+        )
+    except ImportError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini package is not installed. Run: pip install -r requirements.txt",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini explanation could not be generated. Check the API key, model, and Gemini API quota.",
+        ) from error
+
+    return {"explanation": response.output_text.strip()}
