@@ -1,0 +1,2 @@
+# Notebook-only dependency for the optional LSTM model.
+tensorflow
