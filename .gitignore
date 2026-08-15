@@ -1,7 +1,3 @@
-models/*.pkl
-.ipynb_checkpoints/
-.venv/
-
 # Virtual environment
 .venv/
 
@@ -14,6 +10,9 @@ __pycache__/
 
 # Saved model files (regenerated using train_model.py)
 models/*.pkl
+
+# Generated local SQLite database (regenerated using database.py)
+database/*.db
 
 # Secrets, if added later
 .env
